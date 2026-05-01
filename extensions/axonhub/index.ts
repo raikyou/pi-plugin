@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -32,6 +32,11 @@ type RawAxonHubConfig = {
 	provider?: unknown;
 	api?: unknown;
 	modelApis?: unknown;
+};
+
+type PiSettings = {
+	defaultProvider?: string;
+	defaultModel?: string;
 };
 
 type ModelsJson = {
@@ -136,6 +141,15 @@ export default async function axonhub(pi: ExtensionAPI) {
 		return event.payload;
 	});
 
+	pi.on("model_select", async (event) => {
+		if (event.source === "set") {
+			const providerName = state.config.provider ?? DEFAULT_PROVIDER;
+			if (event.model.provider === providerName) {
+				savePiDefaultModel(providerName, event.model.id);
+			}
+		}
+	});
+
 	pi.registerCommand("axonhub", {
 		description: "Show AxonHub status",
 		handler: async (_args, ctx) => {
@@ -156,7 +170,10 @@ async function registerDynamicAxonHubProvider(
 	const api = config.api ?? "openai-completions";
 
 	try {
-		const models = await fetchAxonHubModels(baseUrl, apiKey || undefined, api, config.modelApis ?? {});
+		const piSettings = loadPiSettings();
+		const defaultModel =
+			piSettings.defaultProvider === providerName ? piSettings.defaultModel : undefined;
+		const models = await fetchAxonHubModels(baseUrl, apiKey || undefined, api, config.modelApis ?? {}, defaultModel);
 		pi.registerProvider(providerName, {
 			name: "AxonHub",
 			baseUrl,
@@ -210,6 +227,7 @@ async function fetchAxonHubModels(
 	apiKey: string | undefined,
 	defaultApi: SupportedApi,
 	modelApis: Record<string, SupportedApi>,
+	defaultModel?: string,
 ): Promise<ProviderModelConfig[]> {
 	const headers: Record<string, string> = { Accept: "application/json" };
 	if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
@@ -227,6 +245,14 @@ async function fetchAxonHubModels(
 
 	if (models.length === 0) {
 		throw new Error(`GET ${url} returned no chat models`);
+	}
+
+	if (defaultModel) {
+		models.sort((a, b) => {
+			if (a.id === defaultModel) return -1;
+			if (b.id === defaultModel) return 1;
+			return 0;
+		});
 	}
 
 	return models;
@@ -339,7 +365,7 @@ function looksLikeAxonHubProvider(providerName: string, provider: NonNullable<Mo
 }
 
 function resolveThreadId(sessionId?: string) {
-	return sessionId?.trim() || randomUUID();
+	return `pi-${sessionId?.trim() || randomUUID()}`;
 }
 
 function createTraceId(reason: string) {
@@ -409,6 +435,54 @@ function integerOrDefault(value: unknown, fallback: number) {
 
 function getAgentDir() {
 	return process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent");
+}
+
+function loadPiSettings(): PiSettings {
+	const globalPath = join(getAgentDir(), "settings.json");
+	const projectPath = join(process.cwd(), ".pi", "settings.json");;
+
+	let raw: Record<string, unknown> = {};
+
+	for (const path of [globalPath, projectPath]) {
+		if (!existsSync(path)) continue;
+		try {
+			const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+			raw = { ...raw, ...parsed };
+		} catch {
+			// ignore
+		}
+	}
+
+	return {
+		defaultProvider: typeof raw.defaultProvider === "string" ? raw.defaultProvider : undefined,
+		defaultModel: typeof raw.defaultModel === "string" ? raw.defaultModel : undefined,
+	};
+}
+
+function savePiDefaultModel(provider: string, modelId: string) {
+	const settingsPath = join(getAgentDir(), "settings.json");
+	let raw: Record<string, unknown> = {};
+
+	if (existsSync(settingsPath)) {
+		try {
+			raw = JSON.parse(readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
+		} catch {
+			// ignore, overwrite
+		}
+	}
+
+	raw.defaultProvider = provider;
+	raw.defaultModel = modelId;
+
+	try {
+		const dir = settingsPath.replace(/[^/\\]+$/, "");
+		if (!existsSync(dir)) {
+			mkdirSync(dir, { recursive: true });
+		}
+		writeFileSync(settingsPath, JSON.stringify(raw, null, 2) + "\n", "utf8");
+	} catch {
+		// best effort
+	}
 }
 
 function updateStatus(_ctx: ExtensionContext | ExtensionCommandContext, _state: TraceState) {}
