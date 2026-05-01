@@ -1,0 +1,32 @@
+{
+  "name": "@raikyou/pi-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal Pi plugin, extensions, skills, prompts, and themes.",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "prompts": [
+      "./prompts"
+    ],
+    "themes": [
+      "./themes"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.71.0",
+    "@types/node": "^22.15.3",
+    "typescript": "^5.9.3"
+  }
+}
