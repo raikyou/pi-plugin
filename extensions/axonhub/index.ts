@@ -24,6 +24,7 @@ type AxonHubConfig = {
 	provider?: string;
 	api?: SupportedApi;
 	modelApis?: Record<string, SupportedApi>;
+	traceProviders?: string[];
 };
 
 type RawAxonHubConfig = {
@@ -32,6 +33,7 @@ type RawAxonHubConfig = {
 	provider?: unknown;
 	api?: unknown;
 	modelApis?: unknown;
+	traceProviders?: unknown;
 };
 
 type PiSettings = {
@@ -174,15 +176,16 @@ async function registerDynamicAxonHubProvider(
 		const defaultModel =
 			piSettings.defaultProvider === providerName ? piSettings.defaultModel : undefined;
 		const models = await fetchAxonHubModels(baseUrl, apiKey || undefined, api, config.modelApis ?? {}, defaultModel);
+		const providerBaseUrl = baseUrlForApi(baseUrl, api);
 		pi.registerProvider(providerName, {
 			name: "AxonHub",
-			baseUrl,
+			baseUrl: providerBaseUrl,
 			apiKey: apiKey || config.apiKey || "AXONHUB_API_KEY",
 			api,
 			models,
 		});
 
-		return { name: providerName, baseUrl, models: models.length };
+		return { name: providerName, baseUrl: providerBaseUrl, models: models.length };
 	} catch (error) {
 		return {
 			name: providerName,
@@ -332,36 +335,10 @@ function resolveModelsJsonProviderRequestConfig(provider: string): Pick<Provider
 
 function resolveProviders(config: AxonHubConfig): string[] {
 	const providers = new Set<string>([config.provider ?? DEFAULT_PROVIDER]);
-	for (const provider of discoverAxonHubProviders()) {
+	for (const provider of config.traceProviders ?? []) {
 		providers.add(provider);
 	}
 	return [...providers].sort();
-}
-
-function discoverAxonHubProviders(): string[] {
-	const modelsPath = join(getAgentDir(), "models.json");
-	if (!existsSync(modelsPath)) return [];
-
-	try {
-		const parsed = JSON.parse(readFileSync(modelsPath, "utf8")) as ModelsJson;
-		return Object.entries(parsed.providers ?? {})
-			.filter(([providerName, provider]) => looksLikeAxonHubProvider(providerName, provider))
-			.map(([providerName]) => providerName);
-	} catch {
-		return [];
-	}
-}
-
-function looksLikeAxonHubProvider(providerName: string, provider: NonNullable<ModelsJson["providers"]>[string]) {
-	const normalizedName = providerName.toLowerCase();
-	const baseUrl = typeof provider.baseUrl === "string" ? provider.baseUrl.toLowerCase() : "";
-	const headerNames = Object.keys(provider.headers ?? {}).map((header) => header.toLowerCase());
-
-	return (
-		normalizedName.includes("axon") ||
-		baseUrl.includes("axon") ||
-		headerNames.some((header) => header === "ah-trace-id" || header === "ah-thread-id")
-	);
 }
 
 function resolveThreadId(sessionId?: string) {
@@ -397,6 +374,7 @@ function normalizeConfig(raw: RawAxonHubConfig): AxonHubConfig {
 		provider: stringConfig(raw.provider),
 		api: parseSupportedApi(raw.api),
 		modelApis: recordConfig(raw.modelApis, parseSupportedApi),
+		traceProviders: stringArrayConfig(raw.traceProviders),
 	};
 }
 
@@ -406,6 +384,12 @@ function parseSupportedApi(value: unknown): SupportedApi | undefined {
 
 function stringConfig(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function stringArrayConfig(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const items = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim());
+	return items.length > 0 ? items : undefined;
 }
 
 function recordConfig<T>(value: unknown, parseValue: (value: unknown) => T | undefined): Record<string, T> | undefined {
@@ -422,6 +406,24 @@ function normalizeBaseUrl(value: string) {
 	const trimmed = value.trim();
 	if (!trimmed) return "";
 	return trimmed.replace(/\/+$/, "");
+}
+
+/**
+ * Adjust baseUrl for a specific API type.
+ *
+ * Anthropic SDK expects baseUrl without /v1 (it appends /v1/messages).
+ * OpenAI SDK expects baseUrl with /v1 (it appends /chat/completions).
+ */
+function baseUrlForApi(baseUrl: string, api: SupportedApi): string {
+	const trimmed = baseUrl.replace(/\/+$/, "");
+	const hasVersion = /\/v\d+$/.test(trimmed);
+
+	if (api === "anthropic-messages") {
+		return hasVersion ? trimmed.replace(/\/v\d+$/, "") : trimmed;
+	}
+
+	// openai-completions and openai-responses expect /v1
+	return hasVersion ? trimmed : `${trimmed}/v1`;
 }
 
 function numberOrDefault(value: unknown, fallback: number) {

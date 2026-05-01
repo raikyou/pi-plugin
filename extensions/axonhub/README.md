@@ -7,10 +7,8 @@ Adds AxonHub tracing headers to Pi provider requests and registers AxonHub model
 - `AH-Thread-Id` defaults to Pi's persisted session ID, so `pi --continue` and `pi --resume` keep the same thread for the same session.
 - `AH-Trace-Id` uses a `pi-` prefix (e.g. `pi-turn-<uuid>`, `pi-compact-<uuid>`) and is refreshed before each user prompt starts an agent loop.
 - Compaction calls get a separate `compact` trace ID.
-- The extension registers headers on every AxonHub provider it can find.
+- The extension registers headers on every provider listed in `traceProviders`.
 - When `baseUrl` is configured, the extension fetches `GET /v1/models` and registers those models as a Pi provider.
-
-By default it targets the provider named `axonhub` and any provider in `~/.pi/agent/models.json` whose name, `baseUrl`, or existing headers look AxonHub-related.
 
 ## Configuration
 
@@ -25,11 +23,14 @@ Create `.pi/axonhub.json` in a project or `~/.pi/agent/axonhub.json` globally:
   "modelApis": {
     "gpt-5": "openai-responses",
     "claude-3-5-sonnet": "anthropic-messages"
-  }
+  },
+  "traceProviders": ["axonhub", "anthropic"]
 }
 ```
 
 All fields are optional except `baseUrl`. `baseUrl` may include a `/v1` suffix or omit it; the extension targets `/v1/models` either way, so the same value works for both Anthropic and OpenAI runtime calls.
+
+`traceProviders` is a list of provider names to receive tracing headers (`AH-Trace-Id`, `AH-Thread-Id`). The main `provider` is always included. Use this to trace requests across multiple backends (e.g. `["axonhub", "anthropic"]`).
 
 Supported `api` values:
 
