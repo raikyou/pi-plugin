@@ -314,7 +314,9 @@ function resolveProviderRequestConfig(provider: string, state: TraceState): Pick
 		return { apiKey: state.config.apiKey ?? "AXONHUB_API_KEY" };
 	}
 
-	return resolveModelsJsonProviderRequestConfig(provider);
+	const config = resolveModelsJsonProviderRequestConfig(provider);
+	// Filter out undefined to avoid clearing existing provider keys
+	return Object.fromEntries(Object.entries(config).filter(([, v]) => v !== undefined)) as Pick<ProviderConfig, "apiKey" | "authHeader">;
 }
 
 function resolveModelsJsonProviderRequestConfig(provider: string): Pick<ProviderConfig, "apiKey" | "authHeader"> {
