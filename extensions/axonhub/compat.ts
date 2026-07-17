@@ -15,13 +15,21 @@ type SupportedCompat = AnthropicMessagesCompat | OpenAICompletionsCompat | OpenA
  * no longer available after the model is registered under `axonhub`.
  */
 export function resolvePiAiCompat(model: Model<Api> | undefined, targetApi: Api): SupportedCompat | undefined {
-	if (!model || model.api !== targetApi) return undefined;
+	if (!model) return undefined;
+
+	if (
+		targetApi === "openai-responses" &&
+		(model.api === "openai-responses" || model.api === "openai-codex-responses")
+	) {
+		return resolveOpenAIResponsesCompat(
+			model as Model<"openai-responses" | "openai-codex-responses">,
+		);
+	}
+	if (model.api !== targetApi) return undefined;
 
 	switch (targetApi) {
 		case "openai-completions":
 			return resolveOpenAICompletionsCompat(model as Model<"openai-completions">);
-		case "openai-responses":
-			return resolveOpenAIResponsesCompat(model as Model<"openai-responses">);
 		case "anthropic-messages":
 			return resolveAnthropicMessagesCompat(model as Model<"anthropic-messages">);
 		default:
@@ -30,7 +38,9 @@ export function resolvePiAiCompat(model: Model<Api> | undefined, targetApi: Api)
 	}
 }
 
-function resolveOpenAIResponsesCompat(model: Model<"openai-responses">): OpenAIResponsesCompat {
+function resolveOpenAIResponsesCompat(
+	model: Model<"openai-responses" | "openai-codex-responses">,
+): OpenAIResponsesCompat {
 	const explicit = model.compat;
 	return {
 		...explicit,

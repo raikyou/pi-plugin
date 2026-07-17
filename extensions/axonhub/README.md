@@ -1,19 +1,10 @@
 # pi-axonhub
 
-Adds AxonHub tracing headers to Pi provider requests and registers AxonHub models dynamically from `/v1/models?include=all`.
+Adds AxonHub tracing to Pi requests and registers models from `GET /v1/models?include=all`.
 
-## Behavior
+## Setup
 
-- `AH-Thread-Id` defaults to Pi's persisted session ID, so `pi --continue` and `pi --resume` keep the same thread for the same session.
-- `AH-Trace-Id` uses a `pi-` prefix (e.g. `pi-turn-<uuid>`, `pi-compact-<uuid>`) and is refreshed before each user prompt starts an agent loop.
-- Compaction calls get a separate `compact` trace ID.
-- The extension registers headers on every provider listed in `traceProviders`.
-- When `baseUrl` is configured, the extension fetches `GET /v1/models?include=all` and registers those models as a Pi provider.
-- Models whose `id` and `owned_by` developer match a first-party model in Pi AI inherit that model's protocol, thinking-level map, and effective API compatibility settings, including settings Pi AI normally infers from the original provider or base URL.
-
-## Configuration
-
-Configure AxonHub in the `"axonhub"` object of project `.pi/settings.json` or global `~/.pi/agent/settings.json`:
+Configure project `.pi/settings.json` or global `~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -22,82 +13,136 @@ Configure AxonHub in the `"axonhub"` object of project `.pi/settings.json` or gl
     "apiKey": "$AXONHUB_API_KEY",
     "provider": "axonhub",
     "traceProviders": ["axonhub", "anthropic"],
+    "providerMap": {
+      "openai": "openai-codex",
+      "zai": "opencode-go",
+      "nvidia": null
+    },
+    "modelApis": {
+      "custom-model": "openai-responses"
+    },
     "requestTimeoutMs": 15000
   }
 }
 ```
 
-All fields are optional except `baseUrl`. `baseUrl` may include a `/v1` suffix or omit it; the extension targets `/v1/models` either way, so the same value works for both Anthropic and OpenAI runtime calls.
+`baseUrl` may include `/v1`. It is required for model discovery, but not for tracing existing providers.
 
-`traceProviders` is a list of provider names to receive tracing headers (`AH-Trace-Id`, `AH-Thread-Id`). The main `provider` is always included. Use this to trace requests across multiple backends (e.g. `["axonhub", "anthropic"]`).
-
-Supported `api` values:
-
-- `openai-completions`: OpenAI Chat Completions, calls `/chat/completions`.
-- `openai-responses`: OpenAI Responses, calls `/responses`.
-- `anthropic-messages`: Anthropic Messages, calls the Anthropic messages endpoint.
-- `google-generative-ai`: Google Generative AI, calls `/v1beta/models/{model}:streamGenerateContent`.
-
-The extension treats AxonHub's `owned_by` field as the model developer and uses it with the model ID to find the corresponding first-party Pi AI model. For example, `deepseek/deepseek-v4-pro`, `zai/glm-5.2`, and `openai/gpt-5.6-sol` inherit their respective Pi AI model settings. Developer values are matched against AxonHub's fixed Web UI options; no free-form developer aliases are applied.
-
-AxonHub's curated developer list currently maps to Pi AI as follows:
-
-| AxonHub developer | Pi AI provider | Conversion |
+| Field | Purpose | Default |
 | --- | --- | --- |
-| `anthropic` | `anthropic` | first-party exact-ID match |
-| `deepseek` | `deepseek` | first-party exact-ID match |
-| `google` | `google` | first-party exact-ID match |
-| `minimax` | `minimax` | first-party exact-ID match |
-| `mistral` | `mistral` | metadata match; `mistral-conversations` is not an AxonHub extension protocol, so API falls back |
-| `moonshot` | `moonshotai` | renamed provider, exact-ID match |
-| `nvidia` | `nvidia` | first-party exact-ID match |
-| `openai` | `openai` | first-party exact-ID match |
-| `xai` | `xai` | first-party exact-ID match |
-| `xiaomi` | `xiaomi` | first-party exact-ID match |
-| `zai` | `zai` | first-party exact-ID match |
-| `alibaba`, `bytedance`, `ibm`, `kwaipilot`, `longcat`, `meta`, `stepfun` | none | AxonHub metadata plus configured API fallback |
+| `baseUrl` | AxonHub URL | none |
+| `apiKey` | AxonHub key | resolution below |
+| `provider` | Name of the registered Pi provider | `axonhub` |
+| `api` | Protocol for unmatched models | `openai-completions` |
+| `modelApis` | Per-model protocol override | none |
+| `providerMap` | Maps AxonHub `owned_by` to a Pi AI provider | defaults below |
+| `traceProviders` | Extra providers that receive trace headers | none |
+| `requestTimeoutMs` | Catalog timeout, 1,000–120,000 ms | `15000` |
 
-The lookup is deliberately restricted to the mapped first-party provider and an exact model ID. It does not borrow OpenRouter, Vercel, or another gateway's compatibility settings, because those settings describe that gateway rather than the underlying model developer.
+Supported protocols are `openai-completions`, `openai-responses`, `anthropic-messages`, and `google-generative-ai`. They use AxonHub's `/v1/chat/completions`, `/v1/responses`, Anthropic Messages, and `/v1beta/models/{model}:streamGenerateContent` endpoints respectively.
 
-For a matched model, the extension uses Pi AI's protocol when AxonHub supports it and copies Pi AI's model-specific `thinkingLevelMap`. It also materializes Pi AI's effective `compat` settings before replacing the original provider and base URL with AxonHub. This includes explicit model metadata and implicit provider/URL defaults, preserving differences such as fixed/high-only reasoning, extended `xhigh`/`max` levels, adaptive thinking, developer-role support, token-field selection, and native deferred-tool support.
+## Model mapping
 
-Native dynamic tool loading is therefore inherited when the matched Pi AI model and selected protocol support it. For example, OpenAI Responses models retain `supportsToolSearch`, Anthropic Claude 4.5+ Sonnet/Opus/Fable models retain the inferred `supportsToolReferences` behavior, and Kimi models retain `deferredToolsMode`. If `modelApis` changes a model to a different protocol, protocol-specific compatibility is not copied.
+Each catalog model is resolved with an exact lookup:
 
-If no Pi AI model matches, the model uses the top-level `api` (defaults to `openai-completions`). There is no separate developer-based API fallback.
-
-`modelApis` provides the highest-priority per-model override, so it can correct custom model aliases or force a different protocol. The selection order is `modelApis` -> matched Pi AI model -> top-level `api` fallback.
-
-`apiKey` can be a literal key, `$ENV_VAR`, `${ENV_VAR}`, or a legacy bare environment-variable name. A bare uppercase value resolves from the environment when that variable exists and otherwise remains a literal key for backward compatibility. If unset, the extension falls back to `AXONHUB_API_KEY` and then to the matching provider entry in `~/.pi/agent/models.json`.
-
-`requestTimeoutMs` controls the model-catalog request timeout and must be between 1,000 and 120,000 milliseconds. It defaults to 15,000.
-
-Optional environment override:
-
-- `AXONHUB_API_KEY`: API key override.
-
-## Dynamic Models
-
-Use AxonHub without static `models.json` model entries:
-
-```bash
-pi --model axonhub/gpt-4
+```text
+owned_by → providerMap → Pi AI provider → exact model ID
 ```
 
-The `/v1/models` response is mapped as follows:
+`providerMap` extends or overrides these defaults:
 
-- `id` -> Pi model ID.
-- `name` -> Pi display name.
-- `owned_by` + `id` -> Pi AI model lookup for protocol, thinking levels, compatibility, and missing metadata.
-- `context_length` -> context window (Pi AI value is the fallback).
-- `max_output_tokens` -> max output tokens (Pi AI value is the fallback).
-- `modalities.input` or `capabilities.vision` -> image input support (Pi AI value is the fallback).
-- `capabilities.reasoning` -> thinking support. Supported effort levels come from the matched Pi AI model; unmatched models use Pi's standard reasoning-level behavior.
-- `pricing.input`, `pricing.output`, `pricing.cache_read`, `pricing.cache_write` -> Pi cost metadata (Pi AI values fill missing fields).
+| AxonHub | Pi AI | AxonHub | Pi AI |
+| --- | --- | --- | --- |
+| `anthropic` | `anthropic` | `moonshot` | `moonshotai` |
+| `deepseek` | `deepseek` | `nvidia` | `nvidia` |
+| `google` | `google` | `openai` | `openai` |
+| `minimax` | `minimax` | `xai` | `xai` |
+| `mistral` | `mistral` | `xiaomi` | `xiaomi` |
+|  |  | `zai` | `zai` |
 
-Only models with no `type` or `type: "chat"` are registered.
+Keys and values are case-insensitive. Values must be built-in Pi AI provider IDs, such as `openai-codex` or `opencode-go`. Set a value to `null` to disable its default. Unlisted developers remain unmatched; the extension never searches OpenRouter, Vercel, or another gateway automatically.
 
-## Commands
+Protocol priority is:
 
-- `/pi-axonhub`: show active providers, trace ID, thread ID, provider-request count, and the selected model's protocol and endpoint base URL.
+```text
+modelApis[model ID] → matched Pi AI protocol → top-level api
+```
 
-The provider-request count is diagnostic information: it is the number of traced LLM API requests made in the current trace. A turn with tool calls usually has more than one provider request. Use the native `/reload` to reload configuration and refetch models from AxonHub.
+If a Pi protocol is unsupported, selection falls through. For example, a matched Mistral model cannot use `mistral-conversations` here. If `modelApis` changes the protocol, incompatible Pi AI compatibility settings are not copied.
+
+## Metadata priority
+
+The catalog always supplies the model ID. Its name is used when present, otherwise the Pi AI name or ID is used.
+
+For an exact match, Pi AI wins for:
+
+```text
+protocol, pricing, context window, max tokens, reasoning,
+input modalities, thinking levels, and effective compatibility
+```
+
+For an unmatched model, AxonHub supplies:
+
+| AxonHub field | Used as |
+| --- | --- |
+| `context_length` | context window |
+| `max_output_tokens` | max tokens |
+| `modalities.input` or `capabilities.vision` | input modalities |
+| `capabilities.reasoning` | reasoning support |
+| `pricing.input/output/cache_read/cache_write` | pricing |
+
+Defaults for missing unmatched metadata are 128K context, 16,384 max tokens, text-only input, no reasoning, and zero cost.
+
+Pi AI compatibility inheritance preserves provider behavior such as reasoning levels, developer roles, adaptive thinking, token fields, caching, and deferred tool loading. Only models with no `type` or `type: "chat"` are registered.
+
+## Codex mapping
+
+When AxonHub routes `owned_by: "openai"` to a Codex channel, configure:
+
+```json
+{ "providerMap": { "openai": "openai-codex" } }
+```
+
+The model inherits Pi AI Codex metadata and uses AxonHub `/v1/responses`. Before sending, the extension makes the standard Responses request match the Codex body:
+
+- moves the system prompt to `instructions`
+- forces `store: false`, `stream: true`, and parallel tool calls
+- adds low text verbosity, encrypted reasoning output, and automatic tool choice
+- sets tool `strict` to `null`
+- removes `max_output_tokens`, `prompt_cache_retention`, and the thinking-off `{ "effort": "none" }` block
+- removes OpenAI SDK `x-stainless-*` headers
+- sends `OpenAI-Beta`, `originator`, Pi `User-Agent`, `session-id`, and `x-client-request-id`
+
+Enable `passThroughBody` on the AxonHub Codex channel so this body and the raw response stream pass through; AxonHub may still patch the routed model ID. Enable `passThroughUserAgent` to forward Pi's user agent. Pi authenticates to AxonHub with the AxonHub key, while AxonHub supplies the selected Codex channel's upstream OAuth credentials.
+
+## Tracing
+
+Traced requests receive `AH-Trace-Id` and `AH-Thread-Id`.
+
+- The thread ID uses Pi's persisted session ID, so continue/resume keeps one thread.
+- A new trace ID is created for each user turn.
+- Compaction temporarily uses a `pi-compact-...` trace, then restores the turn trace.
+- The main `provider` is always traced; `traceProviders` adds more providers.
+- `/pi-axonhub` counts provider calls. Tool loops can create several calls; retries reuse headers and are not counted again.
+
+## Authentication
+
+API key resolution order:
+
+```text
+AXONHUB_API_KEY
+  → axonhub.apiKey
+  → matching provider in ~/.pi/agent/models.json
+```
+
+`apiKey` accepts a literal, `$ENV_VAR`, `${ENV_VAR}`, or a legacy bare environment-variable name. A bare uppercase value reads the environment when present and otherwise remains literal.
+
+## Usage
+
+```bash
+pi --model axonhub/gpt-5.6-sol
+```
+
+Use `/reload` after configuration changes. It reloads the extension and refetches the catalog.
+
+`/pi-axonhub` shows traced providers, trace/thread IDs, request count, selected protocol and endpoint, and dynamic-provider status.
