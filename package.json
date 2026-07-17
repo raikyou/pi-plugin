@@ -1,0 +1,38 @@
+{
+  "name": "pi-plugin",
+  "version": "0.1.0",
+  "description": "Personal Pi package for extensions and future resources.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "axonhub",
+    "tracing"
+  ],
+  "files": [
+    "extensions/axonhub",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/axonhub/index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "npm run typecheck",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.80.10",
+    "@earendil-works/pi-coding-agent": "^0.80.10",
+    "@types/node": "^22.15.3",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
