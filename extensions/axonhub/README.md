@@ -1,10 +1,10 @@
 # pi-axonhub
 
-Adds AxonHub tracing to Pi requests and registers models from `GET /v1/models?include=all`.
+Adds AxonHub tracing to Pi requests and registers a refreshable, cached model catalog from `GET /v1/models?include=all`. Requires Pi 0.81.0 or newer.
 
 ## Setup
 
-Configure project `.pi/settings.json` or global `~/.pi/agent/settings.json`:
+Configure global `~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -26,7 +26,7 @@ Configure project `.pi/settings.json` or global `~/.pi/agent/settings.json`:
 }
 ```
 
-`baseUrl` may include `/v1`. It is required for model discovery, but not for tracing existing providers.
+`baseUrl` may include `/v1`. It is required for model discovery, but not for tracing existing providers. AxonHub configuration is intentionally global so the provider is available before Pi resolves or restores the session model; project `.pi/settings.json` overrides are not read.
 
 | Field | Purpose | Default |
 | --- | --- | --- |
@@ -125,17 +125,24 @@ Traced requests receive `AH-Trace-Id` and `AH-Thread-Id`.
 - The main `provider` is always traced; `traceProviders` adds more providers.
 - `/pi-axonhub` counts provider calls. Tool loops can create several calls; retries reuse headers and are not counted again.
 
+## Catalog refresh
+
+Pi restores the last successful AxonHub catalog from `models-store.json` during startup, then refreshes it in the background in interactive and RPC modes. A failed refresh keeps the cached models available. Offline mode (`--offline` or `PI_OFFLINE=1`) uses only the cache and performs no AxonHub request.
+
+The first run has no cached AxonHub models. Start Pi interactively or in RPC mode once and let the background refresh finish; afterward `--list-models`, print mode, and offline mode can use the stored catalog.
+
 ## Authentication
 
 API key resolution order:
 
 ```text
 AXONHUB_API_KEY
-  → axonhub.apiKey
+  → stored /login credential
   → matching provider in ~/.pi/agent/models.json
+  → axonhub.apiKey
 ```
 
-`apiKey` accepts a literal, `$ENV_VAR`, `${ENV_VAR}`, or a legacy bare environment-variable name. A bare uppercase value reads the environment when present and otherwise remains literal.
+Run `/login axonhub` to store a key in Pi's credential store. `apiKey` accepts a literal, `$ENV_VAR`, `${ENV_VAR}`, or a legacy bare environment-variable name. A bare uppercase value reads the environment when present and otherwise remains literal.
 
 ## Usage
 
@@ -143,6 +150,6 @@ AXONHUB_API_KEY
 pi --model axonhub/gpt-5.6-sol
 ```
 
-Use `/reload` after configuration changes. It reloads the extension and refetches the catalog.
+Use `/reload` after configuration changes. It reloads the extension, restores the cached catalog, and lets Pi schedule a refresh.
 
 `/pi-axonhub` shows traced providers, trace/thread IDs, request count, selected protocol and endpoint, and dynamic-provider status.

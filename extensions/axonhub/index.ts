@@ -2,17 +2,23 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { arch, homedir, platform, release } from "node:os";
 import { join } from "node:path";
-import type { Api, Model } from "@earendil-works/pi-ai";
 import {
+	createProvider,
+	type Api,
+	type ApiKeyAuth,
+	type Credential,
+	type Model,
+	type Provider,
+	type ProviderStreams,
+	type RefreshModelsContext,
+} from "@earendil-works/pi-ai";
+import {
+	builtinProviders,
 	getBuiltinModels,
 	getBuiltinProviders,
 	type BuiltinProvider,
 } from "@earendil-works/pi-ai/providers/all";
-import {
-	CONFIG_DIR_NAME,
-	type ExtensionAPI,
-	type ProviderModelConfig,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { resolvePiAiCompat } from "./compat.ts";
 
 const DEFAULT_PROVIDER = "axonhub";
@@ -72,6 +78,7 @@ const BUILTIN_PROVIDERS = new Set<string>(getBuiltinProviders());
 type ProviderMap = Record<string, BuiltinProvider | null>;
 
 const builtinModelCache = new Map<BuiltinProvider, Map<string, Model<Api>>>();
+let builtinProviderRuntimes: Map<string, Provider> | undefined;
 
 type AxonHubConfig = {
 	baseUrl?: string;
@@ -102,17 +109,10 @@ type PiSettings = {
 };
 
 type ModelsJson = {
-	providers?: Record<
-		string,
-		{
-			apiKey?: unknown;
-			authHeader?: unknown;
-		}
-	>;
+	providers?: Record<string, { apiKey?: unknown }>;
 };
 
 type TraceState = {
-	config: AxonHubConfig;
 	providers: string[];
 	threadId: string;
 	traceId: string;
@@ -126,19 +126,18 @@ type DynamicProviderState = {
 	name: string;
 	baseUrl: string;
 	models: number;
-	codexResponseModelIds: Set<string>;
 	error?: string;
 };
 
-type ResolvedProviderModel = {
-	config: ProviderModelConfig;
-	usesCodexResponsesCompatibility: boolean;
+type AxonHubProviderModel = Model<SupportedApi> & {
+	/** Persisted with Pi's dynamic catalog so Codex passthrough survives restarts. */
+	axonhubCodexResponses?: true;
 };
 
-type AxonHubModelCatalog = {
-	models: ProviderModelConfig[];
-	codexResponseModelIds: Set<string>;
-};
+type ApiKeyConfig =
+	| { kind: "environment"; name: string }
+	| { kind: "environment-or-literal"; name: string; fallback: string }
+	| { kind: "literal"; value: string };
 
 type SelectedModelStatus = {
 	provider: string;
@@ -169,17 +168,17 @@ type AxonHubModel = {
 	type?: unknown;
 };
 
-export default async function piAxonHub(pi: ExtensionAPI) {
-	const config = loadAxonHubConfig();
+export default function piAxonHub(pi: ExtensionAPI) {
+	const piSettings = loadPiSettings();
+	const config = normalizeConfig(piSettings.axonhub ?? {});
 	const state: TraceState = {
-		config,
 		providers: resolveProviders(config),
 		threadId: resolveThreadId(),
 		traceId: createTraceId("turn"),
 		requestsInTrace: 0,
 	};
 
-	state.dynamicProvider = await registerDynamicAxonHubProvider(pi, config);
+	state.dynamicProvider = registerDynamicAxonHubProvider(pi, config, piSettings);
 	if (state.dynamicProvider && !state.providers.includes(state.dynamicProvider.name)) {
 		state.providers = [...state.providers, state.dynamicProvider.name].sort();
 	}
@@ -253,91 +252,170 @@ export default async function piAxonHub(pi: ExtensionAPI) {
 	});
 }
 
-async function registerDynamicAxonHubProvider(
+function registerDynamicAxonHubProvider(
 	pi: ExtensionAPI,
 	config: AxonHubConfig,
-): Promise<DynamicProviderState | undefined> {
+	piSettings: PiSettings,
+): DynamicProviderState | undefined {
 	if (!config.baseUrl) return undefined;
 
 	const providerName = config.provider ?? DEFAULT_PROVIDER;
 	let baseUrl = config.baseUrl;
+	const state: DynamicProviderState = {
+		name: providerName,
+		baseUrl,
+		models: 0,
+	};
 
 	try {
 		baseUrl = normalizeBaseUrl(config.baseUrl);
-		const api = config.api ?? "openai-completions";
-		const piSettings = loadPiSettings();
+		state.baseUrl = stripVersionSuffix(baseUrl);
+		const defaultApi = config.api ?? "openai-completions";
 		const defaultModel =
 			piSettings.defaultProvider === providerName ? piSettings.defaultModel : undefined;
-		const catalog = await fetchAxonHubModels(
-			baseUrl,
-			resolveApiKeyForFetch(providerName, config),
-			api,
-			config.modelApis ?? {},
-			config.providerMap ?? {},
-			defaultModel,
-			config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
-		);
-		const modelsProviderConfig = readModelsJsonProviderConfig(providerName);
 
-		pi.registerProvider(providerName, {
+		const provider = createProvider<SupportedApi>({
+			id: providerName,
 			name: "pi-axonhub",
-			baseUrl: stripVersionSuffix(baseUrl),
-			apiKey: resolveProviderApiKey(providerName, config),
-			authHeader: modelsProviderConfig.authHeader,
-			api,
-			models: catalog.models,
+			baseUrl: state.baseUrl,
+			auth: { apiKey: createAxonHubApiKeyAuth(config) },
+			models: [],
+			fetchModels: (context) =>
+				fetchAxonHubModels(
+					baseUrl,
+					resolveApiKeyForFetch(providerName, config, context.credential),
+					providerName,
+					defaultApi,
+					config.modelApis ?? {},
+					config.providerMap ?? {},
+					defaultModel,
+					config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+					context.signal,
+				),
+			api: {
+				"openai-completions": builtinProviderStreams("openrouter"),
+				"openai-responses": builtinProviderStreams("openai"),
+				"anthropic-messages": builtinProviderStreams("anthropic"),
+				"google-generative-ai": builtinProviderStreams("google"),
+			},
 		});
 
-		return {
-			name: providerName,
-			baseUrl: stripVersionSuffix(baseUrl),
-			models: catalog.models.length,
-			codexResponseModelIds: catalog.codexResponseModelIds,
-		};
+		pi.registerProvider(trackDynamicProvider(provider, state));
+		return state;
 	} catch (error) {
-		return {
-			name: providerName,
-			baseUrl,
-			models: 0,
-			codexResponseModelIds: new Set(),
-			error: error instanceof Error ? error.message : String(error),
-		};
+		state.error = error instanceof Error ? error.message : String(error);
+		return state;
 	}
 }
 
-function resolveProviderApiKey(providerName: string, config: AxonHubConfig): string {
-	if (process.env.AXONHUB_API_KEY) return "$AXONHUB_API_KEY";
+function builtinProviderStreams(providerId: BuiltinProvider): ProviderStreams {
+	builtinProviderRuntimes ??= new Map(builtinProviders().map((provider) => [provider.id, provider]));
+	const provider = builtinProviderRuntimes.get(providerId);
+	if (!provider) throw new Error(`Missing built-in Pi AI provider: ${providerId}`);
 
-	const configured = config.apiKey ?? readModelsJsonProviderConfig(providerName).apiKey;
-	if (!configured) return "$AXONHUB_API_KEY";
-
-	const envName = parseEnvReference(configured);
-	if (envName) return `$${envName}`;
-
-	// Preserve support for the legacy bare environment-variable form.
-	if (isEnvironmentName(configured) && process.env[configured] !== undefined) {
-		return `$${configured}`;
-	}
-
-	return configured;
+	return {
+		stream: (model, context, options) => provider.stream(model, context, options),
+		streamSimple: (model, context, options) => provider.streamSimple(model, context, options),
+	};
 }
 
-function resolveApiKeyForFetch(providerName: string, config: AxonHubConfig): string | undefined {
+function trackDynamicProvider(
+	provider: Provider<SupportedApi>,
+	state: DynamicProviderState,
+): Provider<SupportedApi> {
+	const refreshModels = provider.refreshModels;
+	if (!refreshModels) return provider;
+
+	return {
+		...provider,
+		async refreshModels(context: RefreshModelsContext) {
+			try {
+				await refreshModels(context);
+				state.models = provider.getModels().length;
+				if (context.allowNetwork && !context.signal?.aborted) state.error = undefined;
+			} catch (error) {
+				state.error = error instanceof Error ? error.message : String(error);
+				throw error;
+			}
+		},
+	};
+}
+
+function createAxonHubApiKeyAuth(config: AxonHubConfig): ApiKeyAuth {
+	return {
+		name: "AxonHub API key",
+		async login(interaction) {
+			return {
+				type: "api_key",
+				key: await interaction.prompt({ type: "secret", message: "Enter AxonHub API key" }),
+			};
+		},
+		async resolve({ ctx, credential }) {
+			const envKey = await ctx.env("AXONHUB_API_KEY");
+			if (envKey) return { auth: { apiKey: envKey }, source: "AXONHUB_API_KEY" };
+			if (credential?.key) {
+				return { auth: { apiKey: credential.key }, env: credential.env, source: "stored credential" };
+			}
+
+			const configured = await resolveConfiguredApiKey(config.apiKey, (name) => ctx.env(name));
+			return configured
+				? { auth: { apiKey: configured }, source: "axonhub.apiKey" }
+				: undefined;
+		},
+	};
+}
+
+function resolveApiKeyForFetch(
+	providerName: string,
+	config: AxonHubConfig,
+	credential?: Credential,
+): string | undefined {
 	if (process.env.AXONHUB_API_KEY) return process.env.AXONHUB_API_KEY;
+	if (credential?.type === "api_key" && credential.key) return credential.key;
 
-	const configured = config.apiKey ?? readModelsJsonProviderConfig(providerName).apiKey;
+	const key = classifyApiKey(config.apiKey ?? readModelsJsonProviderConfig(providerName).apiKey);
+	if (!key) return undefined;
+
+	switch (key.kind) {
+		case "environment":
+			return process.env[key.name];
+		case "environment-or-literal":
+			return process.env[key.name] ?? key.fallback;
+		case "literal":
+			return key.value;
+	}
+}
+
+async function resolveConfiguredApiKey(
+	configured: string | undefined,
+	getEnv: (name: string) => Promise<string | undefined>,
+): Promise<string | undefined> {
+	const key = classifyApiKey(configured);
+	if (!key) return undefined;
+
+	switch (key.kind) {
+		case "environment":
+			return getEnv(key.name);
+		case "environment-or-literal":
+			return (await getEnv(key.name)) ?? key.fallback;
+		case "literal":
+			return key.value;
+	}
+}
+
+function classifyApiKey(configured: string | undefined): ApiKeyConfig | undefined {
 	if (!configured || configured.startsWith("!")) return undefined;
 
 	const envName = parseEnvReference(configured);
-	if (envName) return process.env[envName];
+	if (envName) return { kind: "environment", name: envName };
 
 	if (isEnvironmentName(configured)) {
-		// A configured bare name resolves from the environment when present;
-		// otherwise preserve backward compatibility by treating it as a literal.
-		return process.env[configured] ?? configured;
+		// Preserve backward compatibility: a bare uppercase name resolves from
+		// the environment when present and otherwise remains a literal key.
+		return { kind: "environment-or-literal", name: configured, fallback: configured };
 	}
 
-	return configured;
+	return { kind: "literal", value: configured };
 }
 
 function parseEnvReference(value: string): string | undefined {
@@ -352,7 +430,7 @@ function isEnvironmentName(value: string): boolean {
 	return /^[A-Z_][A-Z0-9_]*$/.test(value.trim());
 }
 
-function readModelsJsonProviderConfig(providerName: string): { apiKey?: string; authHeader?: boolean } {
+function readModelsJsonProviderConfig(providerName: string): { apiKey?: string } {
 	const modelsPath = join(getAgentDir(), "models.json");
 	if (!existsSync(modelsPath)) return {};
 
@@ -361,7 +439,6 @@ function readModelsJsonProviderConfig(providerName: string): { apiKey?: string; 
 		const providerConfig = parsed.providers?.[providerName];
 		return {
 			apiKey: typeof providerConfig?.apiKey === "string" ? providerConfig.apiKey.trim() : undefined,
-			authHeader: typeof providerConfig?.authHeader === "boolean" ? providerConfig.authHeader : undefined,
 		};
 	} catch {
 		return {};
@@ -371,19 +448,22 @@ function readModelsJsonProviderConfig(providerName: string): { apiKey?: string; 
 async function fetchAxonHubModels(
 	baseUrl: string,
 	apiKey: string | undefined,
+	providerName: string,
 	defaultApi: SupportedApi,
 	modelApis: Record<string, SupportedApi>,
 	providerMap: ProviderMap,
 	defaultModel: string | undefined,
 	timeoutMs: number,
-): Promise<AxonHubModelCatalog> {
+	signal?: AbortSignal,
+): Promise<AxonHubProviderModel[]> {
 	const headers: Record<string, string> = { Accept: "application/json" };
 	if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
 	const url = buildModelsUrl(baseUrl);
+	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const response = await fetch(url, {
 		headers,
-		signal: AbortSignal.timeout(timeoutMs),
+		signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
 	});
 	if (!response.ok) {
 		throw new Error(`GET ${url} failed with HTTP ${response.status}`);
@@ -395,21 +475,17 @@ async function fetchAxonHubModels(
 		throw new Error(`GET ${url} returned an invalid model catalog`);
 	}
 
-	const modelsById = new Map<string, ProviderModelConfig>();
-	const codexResponseModelIds = new Set<string>();
+	const modelsById = new Map<string, AxonHubProviderModel>();
 	for (const rawModel of data) {
-		const resolved = toProviderModel(
+		const model = toProviderModel(
 			objectConfig(rawModel) as AxonHubModel | undefined,
 			defaultApi,
 			modelApis,
 			providerMap,
+			providerName,
 			baseUrl,
 		);
-		if (!resolved) continue;
-
-		modelsById.set(resolved.config.id, resolved.config);
-		if (resolved.usesCodexResponsesCompatibility) codexResponseModelIds.add(resolved.config.id);
-		else codexResponseModelIds.delete(resolved.config.id);
+		if (model) modelsById.set(model.id, model);
 	}
 
 	const models = [...modelsById.values()].sort((a, b) => {
@@ -422,7 +498,7 @@ async function fetchAxonHubModels(
 		throw new Error(`GET ${url} returned no chat models`);
 	}
 
-	return { models, codexResponseModelIds };
+	return models;
 }
 
 function buildModelsUrl(baseUrl: string): string {
@@ -439,8 +515,9 @@ function toProviderModel(
 	defaultApi: SupportedApi,
 	modelApis: Record<string, SupportedApi>,
 	providerMap: ProviderMap,
+	providerName: string,
 	baseUrl: string,
-): ResolvedProviderModel | undefined {
+): AxonHubProviderModel | undefined {
 	if (!model || typeof model.id !== "string") return undefined;
 	const id = model.id.trim();
 	if (!id || (typeof model.type === "string" && model.type !== "chat")) return undefined;
@@ -451,35 +528,36 @@ function toProviderModel(
 	const inheritedApi = resolveInheritedApi(piAiModel?.api);
 	const modelApi = modelApis[id] ?? inheritedApi ?? defaultApi;
 
+	const usesCodexResponsesCompatibility =
+		piAiModel?.api === "openai-codex-responses" && modelApi === "openai-responses";
+
 	return {
-		config: {
-			id,
-			name:
-				typeof model.name === "string" && model.name.trim()
-					? model.name.trim()
-					: (piAiModel?.name ?? id),
-			api: modelApi,
-			baseUrl: baseUrlForApi(baseUrl, modelApi),
-			reasoning:
-				piAiModel?.reasoning ??
-				(typeof capabilities.reasoning === "boolean" ? capabilities.reasoning : false),
-			thinkingLevelMap: piAiModel?.thinkingLevelMap ? { ...piAiModel.thinkingLevelMap } : undefined,
-			input: resolveModelInput(model, piAiModel),
-			cost: piAiModel
-				? { ...piAiModel.cost }
-				: {
-						input: nonNegativeNumberOrDefault(pricing.input, 0),
-						output: nonNegativeNumberOrDefault(pricing.output, 0),
-						cacheRead: nonNegativeNumberOrDefault(pricing.cache_read, 0),
-						cacheWrite: nonNegativeNumberOrDefault(pricing.cache_write, 0),
-					},
-			contextWindow:
-				piAiModel?.contextWindow ?? positiveIntegerOrDefault(model.context_length, 128_000),
-			maxTokens: piAiModel?.maxTokens ?? positiveIntegerOrDefault(model.max_output_tokens, 16_384),
-			compat: resolvePiAiCompat(piAiModel, modelApi),
-		},
-		usesCodexResponsesCompatibility:
-			piAiModel?.api === "openai-codex-responses" && modelApi === "openai-responses",
+		id,
+		name:
+			typeof model.name === "string" && model.name.trim()
+				? model.name.trim()
+				: (piAiModel?.name ?? id),
+		api: modelApi,
+		provider: providerName,
+		baseUrl: baseUrlForApi(baseUrl, modelApi),
+		reasoning:
+			piAiModel?.reasoning ??
+			(typeof capabilities.reasoning === "boolean" ? capabilities.reasoning : false),
+		thinkingLevelMap: piAiModel?.thinkingLevelMap ? { ...piAiModel.thinkingLevelMap } : undefined,
+		input: resolveModelInput(model, piAiModel),
+		cost: piAiModel
+			? { ...piAiModel.cost }
+			: {
+					input: nonNegativeNumberOrDefault(pricing.input, 0),
+					output: nonNegativeNumberOrDefault(pricing.output, 0),
+					cacheRead: nonNegativeNumberOrDefault(pricing.cache_read, 0),
+					cacheWrite: nonNegativeNumberOrDefault(pricing.cache_write, 0),
+				},
+		contextWindow:
+			piAiModel?.contextWindow ?? positiveIntegerOrDefault(model.context_length, 128_000),
+		maxTokens: piAiModel?.maxTokens ?? positiveIntegerOrDefault(model.max_output_tokens, 16_384),
+		compat: resolvePiAiCompat(piAiModel, modelApi),
+		...(usesCodexResponsesCompatibility ? { axonhubCodexResponses: true as const } : {}),
 	};
 }
 
@@ -593,16 +671,10 @@ function isTracedProvider(provider: string | undefined, state: TraceState): bool
 }
 
 /** A dynamically-registered AxonHub model that must be sent as a native Codex Responses request. */
-function isCodexResponsesModel(
-	model: { provider: string; id: string } | undefined,
-	state: TraceState,
-): boolean {
-	const dynamicProvider = state.dynamicProvider;
+function isCodexResponsesModel(model: Model<Api> | undefined, state: TraceState): boolean {
 	return (
-		model !== undefined &&
-		dynamicProvider !== undefined &&
-		model.provider === dynamicProvider.name &&
-		dynamicProvider.codexResponseModelIds.has(model.id)
+		model?.provider === state.dynamicProvider?.name &&
+		(model as AxonHubProviderModel | undefined)?.axonhubCodexResponses === true
 	);
 }
 
@@ -612,10 +684,6 @@ function resolveThreadId(sessionId?: string): string {
 
 function createTraceId(reason: "turn" | "compact"): string {
 	return `pi-${reason}-${randomUUID()}`;
-}
-
-function loadAxonHubConfig(): AxonHubConfig {
-	return normalizeConfig(loadPiSettings().axonhub ?? {});
 }
 
 function normalizeConfig(raw: RawAxonHubConfig): AxonHubConfig {
@@ -733,26 +801,15 @@ function loadPiSettings(): PiSettings {
 }
 
 function loadSettingsJson(): Record<string, unknown> {
-	const globalPath = join(getAgentDir(), "settings.json");
-	const projectPath = join(process.cwd(), CONFIG_DIR_NAME, "settings.json");
-	let settings: Record<string, unknown> = {};
+	const path = join(getAgentDir(), "settings.json");
+	if (!existsSync(path)) return {};
 
-	for (const path of [globalPath, projectPath]) {
-		if (!existsSync(path)) continue;
-		try {
-			const next = objectConfig(JSON.parse(readFileSync(path, "utf8")));
-			if (!next) continue;
-
-			const previousAxonHub = objectConfig(settings.axonhub) ?? {};
-			const nextAxonHub = objectConfig(next.axonhub);
-			settings = { ...settings, ...next };
-			if (nextAxonHub) settings.axonhub = { ...previousAxonHub, ...nextAxonHub };
-		} catch {
-			// Ignore malformed settings here; Pi reports its own settings errors.
-		}
+	try {
+		return objectConfig(JSON.parse(readFileSync(path, "utf8"))) ?? {};
+	} catch {
+		// Ignore malformed settings here; Pi reports its own settings errors.
+		return {};
 	}
-
-	return settings;
 }
 
 function objectConfig(value: unknown): Record<string, unknown> | undefined {
