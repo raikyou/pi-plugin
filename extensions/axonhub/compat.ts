@@ -14,6 +14,22 @@ type SupportedCompat = AnthropicMessagesCompat | OpenAICompletionsCompat | OpenA
  * these settings implicitly from the first-party provider/base URL, which are
  * no longer available after the model is registered under `axonhub`.
  */
+export function resolvePiAiCompat(
+	model: Model<Api> | undefined,
+	targetApi: "openai-completions",
+): OpenAICompletionsCompat | undefined;
+export function resolvePiAiCompat(
+	model: Model<Api> | undefined,
+	targetApi: "openai-responses",
+): OpenAIResponsesCompat | undefined;
+export function resolvePiAiCompat(
+	model: Model<Api> | undefined,
+	targetApi: "anthropic-messages",
+): AnthropicMessagesCompat | undefined;
+export function resolvePiAiCompat(
+	model: Model<Api> | undefined,
+	targetApi: Api,
+): SupportedCompat | undefined;
 export function resolvePiAiCompat(model: Model<Api> | undefined, targetApi: Api): SupportedCompat | undefined {
 	if (!model) return undefined;
 
@@ -49,7 +65,10 @@ function resolveOpenAIResponsesCompat(
 			explicit?.sessionAffinityFormat ??
 			(model.provider === "openrouter" || model.baseUrl.includes("openrouter.ai") ? "openrouter" : "openai"),
 		supportsLongCacheRetention: explicit?.supportsLongCacheRetention ?? true,
+		supportsStrictMode: explicit?.supportsStrictMode ?? false,
+		supportsOpenAIGrammarTools: explicit?.supportsOpenAIGrammarTools ?? false,
 		supportsToolSearch: explicit?.supportsToolSearch ?? false,
+		supportsExplicitPromptCacheMode: explicit?.supportsExplicitPromptCacheMode ?? false,
 	};
 }
 
@@ -63,6 +82,7 @@ function resolveAnthropicMessagesCompat(model: Model<"anthropic-messages">): Ant
 		supportsCacheControlOnTools: explicit?.supportsCacheControlOnTools ?? true,
 		supportsTemperature: explicit?.supportsTemperature ?? true,
 		allowEmptySignature: explicit?.allowEmptySignature ?? false,
+		supportsStrictTools: explicit?.supportsStrictTools ?? false,
 		supportsToolReferences: explicit?.supportsToolReferences ?? defaultSupportsToolReferences(model),
 	};
 }
@@ -90,6 +110,7 @@ function resolveOpenAICompletionsCompat(model: Model<"openai-completions">): Ope
 		supportsDeveloperRole: explicit.supportsDeveloperRole ?? detected.supportsDeveloperRole,
 		supportsReasoningEffort: explicit.supportsReasoningEffort ?? detected.supportsReasoningEffort,
 		supportsUsageInStreaming: explicit.supportsUsageInStreaming ?? detected.supportsUsageInStreaming,
+		supportsFinishReason: explicit.supportsFinishReason ?? detected.supportsFinishReason,
 		maxTokensField: explicit.maxTokensField ?? detected.maxTokensField,
 		requiresToolResultName: explicit.requiresToolResultName ?? detected.requiresToolResultName,
 		requiresAssistantAfterToolResult:
@@ -105,8 +126,13 @@ function resolveOpenAICompletionsCompat(model: Model<"openai-completions">): Ope
 		openRouterRouting: explicit.openRouterRouting,
 		vercelGatewayRouting: explicit.vercelGatewayRouting,
 		chatTemplateKwargs: explicit.chatTemplateKwargs ?? detected.chatTemplateKwargs,
+		chatTemplateArgs: explicit.chatTemplateArgs ?? detected.chatTemplateArgs,
 		zaiToolStream: explicit.zaiToolStream ?? detected.zaiToolStream,
+		supportsThinkingTokenBudget:
+			explicit.supportsThinkingTokenBudget ?? detected.supportsThinkingTokenBudget,
 		supportsStrictMode: explicit.supportsStrictMode ?? detected.supportsStrictMode,
+		supportsOpenAIGrammarTools:
+			explicit.supportsOpenAIGrammarTools ?? detected.supportsOpenAIGrammarTools,
 		cacheControlFormat: explicit.cacheControlFormat ?? detected.cacheControlFormat,
 		sendSessionAffinityHeaders:
 			explicit.sendSessionAffinityHeaders ?? detected.sendSessionAffinityHeaders,
@@ -158,7 +184,8 @@ function detectOpenAICompletionsCompat(model: Model<"openai-completions">): Open
 		isCloudflareAiGateway ||
 		isTogether ||
 		isNvidia ||
-		isAntLing;
+		isAntLing ||
+		isZai;
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
 	const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com");
 	const isOpenRouterDeveloperRoleModel =
@@ -170,6 +197,7 @@ function detectOpenAICompletionsCompat(model: Model<"openai-completions">): Open
 		supportsReasoningEffort:
 			!isGrok && !isZai && !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia && !isAntLing,
 		supportsUsageInStreaming: true,
+		supportsFinishReason: true,
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: false,
 		requiresAssistantAfterToolResult: false,
@@ -187,8 +215,11 @@ function detectOpenAICompletionsCompat(model: Model<"openai-completions">): Open
 							? "openrouter"
 							: "openai",
 		chatTemplateKwargs: {},
+		chatTemplateArgs: {},
 		zaiToolStream: false,
+		supportsThinkingTokenBudget: false,
 		supportsStrictMode: !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia,
+		supportsOpenAIGrammarTools: false,
 		cacheControlFormat:
 			provider === "openrouter" && model.id.startsWith("anthropic/") ? "anthropic" : undefined,
 		sendSessionAffinityHeaders: false,

@@ -1,6 +1,6 @@
 # pi-axonhub
 
-Adds AxonHub tracing to Pi requests and registers a refreshable, cached model catalog from `GET /v1/models?include=all`. Requires Pi 0.81.0 or newer.
+Adds AxonHub tracing to Pi requests and registers a refreshable, cached model catalog from `GET /v1/models?include=all`. Requires Pi 0.84.0 or newer.
 
 ## Setup
 
@@ -93,7 +93,26 @@ For an unmatched model, AxonHub supplies:
 
 Defaults for missing unmatched metadata are 128K context, 16,384 max tokens, text-only input, no reasoning, and zero cost.
 
-Pi AI compatibility inheritance preserves provider behavior such as reasoning levels, developer roles, adaptive thinking, token fields, caching, and deferred tool loading. Only models with no `type` or `type: "chat"` are registered.
+Pi AI compatibility inheritance preserves provider behavior such as reasoning levels, developer roles, adaptive thinking, token fields, caching, grammar tools, strict tool schemas, and deferred tool loading. Matching models also inherit any default sampling parameters supplied by Pi AI. Only models with no `type` or `type: "chat"` are registered.
+
+Pi 0.84 model overrides apply on top of the dynamically registered catalog. For example, configure provider-specific sampling in `~/.pi/agent/models.json` without duplicating the AxonHub model list:
+
+```json
+{
+  "providers": {
+    "axonhub": {
+      "modelOverrides": {
+        "custom-model": {
+          "samplingParams": {
+            "temperature": 0.7,
+            "top_p": 0.95
+          }
+        }
+      }
+    }
+  }
+}
+```
 
 ## Codex mapping
 

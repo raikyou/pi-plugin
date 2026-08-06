@@ -16,6 +16,7 @@
     ]
   },
   "include": [
-    "extensions/**/*.ts"
+    "extensions/**/*.ts",
+    "tests/**/*.ts"
   ]
 }

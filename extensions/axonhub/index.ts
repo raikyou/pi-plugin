@@ -332,7 +332,7 @@ function trackDynamicProvider(
 			try {
 				await refreshModels(context);
 				state.models = provider.getModels().length;
-				if (context.allowNetwork && !context.signal?.aborted) state.error = undefined;
+				if (context.allowNetwork && !context.signal.aborted) state.error = undefined;
 			} catch (error) {
 				state.error = error instanceof Error ? error.message : String(error);
 				throw error;
@@ -556,6 +556,7 @@ function toProviderModel(
 		contextWindow:
 			piAiModel?.contextWindow ?? positiveIntegerOrDefault(model.context_length, 128_000),
 		maxTokens: piAiModel?.maxTokens ?? positiveIntegerOrDefault(model.max_output_tokens, 16_384),
+		samplingParams: piAiModel?.samplingParams ? { ...piAiModel.samplingParams } : undefined,
 		compat: resolvePiAiCompat(piAiModel, modelApi),
 		...(usesCodexResponsesCompatibility ? { axonhubCodexResponses: true as const } : {}),
 	};
@@ -587,7 +588,7 @@ function toCodexResponsesPayload(payload: Record<string, unknown>): Record<strin
 	const tools = Array.isArray(payload.tools)
 		? payload.tools.map((tool) => {
 				const definition = objectConfig(tool);
-				return definition ? { ...definition, strict: null } : tool;
+				return definition?.type === "function" ? { ...definition, strict: null } : tool;
 			})
 		: undefined;
 
